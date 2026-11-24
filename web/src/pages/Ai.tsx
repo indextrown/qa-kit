@@ -7,8 +7,8 @@ import { cx, store, stored } from "../lib/util";
 import { AiActivity } from "../components/AiActivity";
 import { AiChat } from "../components/AiChat";
 import { RobotCursor } from "../components/RobotCursor";
+import { LiveScreen } from "../components/LiveScreen";
 import { Badge, Card, Empty, PageHeader } from "../components/ui";
-import { StreamImg } from "../components/StreamImg";
 
 const noop = () => {};
 
@@ -77,8 +77,8 @@ export function Ai() {
             <div className="w-full min-w-0 space-y-2">
           <div className={cx("mx-auto w-full bg-neutral-900 shadow-e3 ring-1 ring-black/40", wide ? "max-w-[880px] rounded-[30px] p-[9px]" : "max-w-[360px] rounded-[44px] p-[11px]")}>
             <div className={cx("relative overflow-hidden bg-black", wide ? "rounded-[22px]" : "rounded-[34px]")}>
-              <StreamImg src="/api/stream?k=ai" alt="기기 화면 (실시간)" className="block w-full" style={{ aspectRatio: wide ? undefined : "9 / 19.5" }}
-                onLoad={(e) => { const { naturalWidth: w, naturalHeight: h } = e.currentTarget; if (w && h && (w > h) !== wide) setWide(w > h); }} />
+              <LiveScreen streamKey="ai" alt="기기 화면 (실시간)" className="block w-full" style={{ aspectRatio: wide ? undefined : "9 / 19.5" }}
+                onSize={(w, h) => { if ((w > h) !== wide) setWide(w > h); }} />
               {layer && els?.screen && (() => { const scr = els.screen; return (
                 <div className={cx("absolute inset-0", aiRunning && "opacity-40")} onMouseLeave={() => setHover(null)}>
                   {els.elements.map((e, i) => (
