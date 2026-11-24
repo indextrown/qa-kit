@@ -2,8 +2,8 @@
 # bin/qakit이 lib/qakit/*.py를 이름 순서대로 한 이름 공간에 읽는다 (따로 import하지 않음).
 # ─────────────────────────────── 시뮬레이터 ───────────────────────────────
 
-def simulator_udid(name_or_udid):
-    data = json.loads(run(["xcrun", "simctl", "list", "devices", "available", "-j"]).stdout)
+def simulator_udid(name_or_udid, timeout=None):
+    data = json.loads(run(["xcrun", "simctl", "list", "devices", "available", "-j"], timeout=timeout).stdout)
     candidates = []
     for runtime, devices in data["devices"].items():
         if "iOS" not in runtime:
@@ -89,8 +89,8 @@ def device_busy(udid):
     return None
 
 
-def app_installed(udid, bundle_id):
-    r = run(["xcrun", "simctl", "get_app_container", udid, bundle_id], check=False)
+def app_installed(udid, bundle_id, timeout=None):
+    r = run(["xcrun", "simctl", "get_app_container", udid, bundle_id], check=False, timeout=timeout)
     return r.returncode == 0
 
 
@@ -300,12 +300,32 @@ def device_team(ws):
     return team
 
 
+def signing_certificate_sha1(app_path):
+    """앱에 서명한 인증서(맨 앞 인증서)의 SHA-1을 돌려준다. 못 읽으면 None.
+
+    `security find-identity`가 보여 주는 해시와 같은 값이라 `codesign --sign`에 그대로 쓸 수 있다.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        subprocess.run(["codesign", "-d", f"--extract-certificates={tmp}/cert", str(app_path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        leaf = tmp / "cert0"
+        if not leaf.exists():
+            return None
+        return hashlib.sha1(leaf.read_bytes()).hexdigest().upper()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def embed_autoid(app_path, dylib):
     """AutoID dylib을 앱의 Frameworks/에 넣고 앱과 같은 인증서·권한으로 다시 서명한다."""
     r = run(["codesign", "-dvvv", str(app_path)], check=False)
     identity = next((l.split("=", 1)[1] for l in (r.stdout or "").splitlines() if l.startswith("Authority=")), None)
     if not identity:
         fail(f"{app_path.name}의 서명 인증서를 읽지 못했습니다.", "Xcode에서 이 앱을 기기로 한 번 실행해 서명을 확인하세요")
+    # 키체인에 같은 이름의 인증서가 둘 이상이면 이름으로는 "ambiguous"로 실패한다.
+    # 앱에 실제로 서명한 인증서의 SHA-1으로 지정하면 어느 것인지 정확히 고를 수 있다.
+    identity = signing_certificate_sha1(app_path) or identity
     ent = Path(tempfile.mkstemp(suffix=".plist")[1])
     try:
         # stdout만 (stderr의 "Executable=…" 줄이 섞이면 plist가 깨진다)
@@ -359,7 +379,7 @@ def device_app_pid(ws):
 
 def ensure_device_runner(team):
     """시나리오 실행기를 실기기용으로 서명해서 빌드한다 (도구·팀이 바뀌었을 때만)."""
-    build = KIT_DIR / ".build" / f"scenario-runner-device-{team}"
+    build = BUILD_DIR / f"scenario-runner-device-{team}"
     h = hashlib.sha1(team.encode())
     for base in (KIT_DIR / "Sources" / "QAKit", KIT_DIR / "ScenarioRunner"):
         for f in sorted(base.rglob("*")):
@@ -372,9 +392,9 @@ def ensure_device_runner(team):
     if found and stamp.exists() and stamp.read_text() == h.hexdigest():
         return found[0]
     info("시나리오 실행기 빌드 중 (실기기용, 도구가 바뀌었을 때 한 번)...")
-    run(["xcodegen", "generate", "--quiet", "--spec", str(KIT_DIR / "ScenarioRunner" / "project.yml"),
-         "--project", str(KIT_DIR / "ScenarioRunner")])
-    r = run(["xcodebuild", "build-for-testing", "-project", str(SCENARIO_PROJECT), "-scheme", "ScenarioTests",
+    runner = scenario_runner_src()
+    run(["xcodegen", "generate", "--quiet", "--spec", str(runner / "project.yml"), "--project", str(runner)])
+    r = run(["xcodebuild", "build-for-testing", "-project", str(runner / "QAScenarioRunner.xcodeproj"), "-scheme", "ScenarioTests",
              "-destination", "generic/platform=iOS", "-derivedDataPath", str(build),
              "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={team}",
              "-allowProvisioningUpdates"], check=False)

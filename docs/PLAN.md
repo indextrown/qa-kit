@@ -663,6 +663,11 @@ AI가 누르는 모든 동작이 ID·라벨 기반 시나리오 단계다 (좌�
 | 상주 실행기가 **앱을 켜지 않고 붙기만**(`--no-launch`, `XCUIApplication(bundleIdentifier:)`로 화면 구조만 읽음) | ✅ 읽기 → 검색 탭 → 읽기(검색 화면) → 뒤로 → 읽기(홈), 읽기 1.0~1.2초 |
 
 - ~~XCUITest가 켠 앱은 자동화 모드라 바깥 터치 신호를 무시한다~~ → **정정 (H1에서 다시 잼)**: 실행기가 앱을 새로 켜고 XCUITest로 누른 뒤에도 직접 터치가 매번 먹혔다 (켠 직후 ✅, XCUITest 탭 뒤 ✅ ✅). 처음 막혔을 때는 실행기가 오래 떠 있었고 화면 구조 읽기가 60초 넘게 멈춘 적이 있었다 — **실행기가 무언가를 기다리며 멈춘 상태**에서 바깥 터치가 막힌 것으로 보이지만 재현이 안 돼 확정 못 함. → 설계: "붙기만"이 꼭 필요하진 않고, 대신 **직접 터치가 무시됐는지 알아채기**(터치 뒤 실시간 화면이 바뀌지 않으면 XCUITest 탭으로 다시)가 필요.
+- **추가 확인 (2026-11-16 밤, Xcode 27.0)**: 따로 만든 새 시뮬레이터(Device Hub에 한 번도 띄우지 않음)에서 설정 앱으로 시험 — 실행기가 켠 앱 ❌, 실행기를 멈추고 `simctl`로 켠 앱 ❌, 실행기 없이 도우미를 오래 띄워 탭·끌기·150ms 탭 ❌ (전후 화면이 바이트까지 같음). **켠 방식과 무관하게** 이 기기에선 모두 무시 → "XCUITest가 켠 앱은 무시"는 원인이 아니다. 공용 기기(Device Hub에 띄워 둠)에선 H3·H4 동안 실행기가 켠 앱에 계속 먹혔으니, Device Hub에 띄운 적이 있는지가 의심되지만 사용자 화면(Device Hub 대상)을 바꿔야 해서 아직 확인 못 함. → 코드 주석·`qakit touch` 경고를 "켠 방식으로 미리 경고" 대신 "누른 뒤 화면이 그대로면 알림 + 아는 원인 안내"로 바꿈.
+- **Device Hub로 확인 (같은 날 밤)**: 새 시뮬레이터를 실시간 화면 도구(프레임 콜백)에 연결 ❌, Device Hub에 띄움 ❌, Device Hub에서 마우스로 한 번 누른 뒤 ❌ — 그런데 Device Hub의 마우스 클릭은 그 기기에서 ✅. 화면 속성(전원·백라이트·60Hz)과 `device.plist`도 공용 기기와 같음. → "Device Hub에 띄운 적이 없어서"도 아님. simtouch 경로(Legacy HID 클라이언트 + Indigo 메시지, 경로 표시 0x32)가 새 기기에서 안 맞는 것으로 보이고, Device Hub가 보내는 메시지와의 차이를 다음에 본다. `qakit touch` 안내도 "qakit show로 띄운 뒤 다시"를 지우고 "그 기기에선 XCUITest 탭"으로.
+- **Device Hub 메시지 차이 (같은 날 밤, 역어셈블·기기 안 로그)**: Device Hub는 터치를 CoreDevice의 **dtuhidd**(부팅 때 `mainTouchscreen(0x101)` 등을 만듦)로 넣고, simtouch는 옛 Indigo 경로로 넣는다. simtouch 메시지를 backboardd의 **SimulatorHID**가 내장 디지타이저(`builtin`)로 받으면 먹히고, dtuhidd로 넘기면 CoreDevice 트랙패드류 서비스로 처리돼 `ignoring digitizer event … from unsupported service`로 버려진다. **부팅마다 갈린다** — 시험용 기기 1차 부팅 ❌ → 2차(Device Hub)·3차(`simctl`) ✅, 공용 기기 00:49 부팅 ✅(그날 내내) / 23:19 부팅 ❌. 그러니 "새 기기"·"simctl boot"·"Device Hub 표시"도 원인이 아님. 목적지 필드(0x6c·0x10c)·이벤트 종류(NSEvent 1·2·6)는 Device Hub와 같음을 확인, 모르는 목적지(0x101)는 SimulatorHID assert로 backboardd가 죽음. 안내를 "껐다 켜면 될 때가 있고, 안 되면 XCUITest 탭"으로. 다음 후보: dtuhidd 새 경로로 넣기.
+- **dtuhidd 경로 시도 (11-17, 보류)**: Mac 쪽에서 dtuhidd `…remote.hid.digitizer`에 XPC로 붙는 데 성공(`SimDevice lookup:` → `xpc_endpoint_create_mach_port_4sim` → `xpc_connection_create_from_endpoint`), 메시지 타입 `CoreDeviceUtilities.IndigoDigitizerEvent`의 키·원시값까지 찾음. 그러나 Mercury 봉투 형식을 못 맞춰 메시지가 조용히 버려지고(SIP로 디버거도 못 붙임), 연결마다 생기는 우리 터치스크린은 backboardd가 `already have a main display digitizer`로 본 화면 입력에서 뺄 가능성이 커서(Device Hub가 먼저 소유) 보류. 대안: 상주 실행기에서 XCTest 이벤트 합성(`XCSynthesizedEventRecord`)으로 좌표 터치.
+- **이벤트 합성으로 직접 터치 (11-17) ✅**: 상주 실행기에 `/touch`(Sources/QAKit/Serve/QASynth.swift — `XCPointerEventPath`·`XCSynthesizedEventRecord`·`XCTRunnerDaemonSession.daemonProxy._XCT_synthesizeEvent:completion:`, Maestro와 같은 방식). qakit `DirectTouch`가 누를 때마다 고름: 같은 실행기 코드가 떠 있으면 이벤트 합성, 없으면 simtouch (AI 직접 터치·라이브 세션·`qakit touch`). **확인**: simtouch가 막힌 부팅(새 기기 첫 부팅)에서 이벤트 합성 탭으로 설정 → 일반 ✅, 탭 중앙값 350ms(simtouch 약 90ms, XCUITest 탭 0.8~2.2초), 끌기·길게 누르기 ✅. 완료 콜백에 `@escaping`을 빠뜨리면 실행기가 죽음(겪음). 새 기기를 막 켠 직후엔 부하(부하 평균 256)로 첫 탭이 9~23초. 이벤트 합성을 한 번 보낸 뒤엔 막혔던 simtouch도 먹히기 시작(두 번 봄, 미확인). **Device Hub를 끄면 켜져 있던 시뮬레이터가 모두 꺼진다** (실험 중 공용 기기까지 꺼져 바로 다시 켬) → 끄지 말고 목록에서 고를 것.
 - 터치 경로: `SimDeviceLegacyHIDClient`(SimulatorKit, Xcode 27은 `Contents/SharedFrameworks/`) + IOKit `IOHIDEventCreateDigitizerEvent`/`…FingerEvent` → `IndigoHIDMessageForTrackpadEventFromHIDEventRef` → 메시지 0x6c(와 0x10c)에 경로 표시 `UInt32(0x32)` → `sendWithMessage:freeWhenDone:…`. 좌표는 화면 대비 0~1. 마우스 방식(`IndigoHIDMessageForMouseNSEvent`)은 이 환경에서 막혀 있을 때 시험했고, 풀린 상태에선 디지타이저만 확인.
 - 한 번씩 띄우는 도우미는 0.85초(프레임워크 불러오기 0.5 + 준비 0.2 + 보내기 0.1) → **계속 떠 있는 도우미**여야 탭이 0.1초대.
 
@@ -684,7 +689,7 @@ AI가 누르는 모든 동작이 ID·라벨 기반 시나리오 단계다 (좌�
 
 | 단계 | 내용 |
 |---|---|
-| **H1. 터치 도우미** ✅ | `Tools/simtouch/simtouch.swift` (직접 작성): 계속 떠 있고 stdin 한 줄 명령(tap·press·swipe·down·move·up·ping) → 한 줄 답, 준비되면 `ready`, 디지타이저(없으면 마우스). `TouchHelper`(띄우기·준비 기다리기·죽으면 다시), `qakit touch`(확인용, 실행기가 앱을 켰으면 경고). **탭 왕복 약 90ms(누름 60ms 포함)**, 도우미 준비 0.46초, 쓸기 0.36초 — XCUITest 탭 0.8~2.2초 |
+| **H1. 터치 도우미** ✅ | `Tools/simtouch/simtouch.swift` (직접 작성): 계속 떠 있고 stdin 한 줄 명령(tap·press·swipe·down·move·up·ping) → 한 줄 답, 준비되면 `ready`, 디지타이저(없으면 마우스). `TouchHelper`(띄우기·준비 기다리기·죽으면 다시), `qakit touch`(확인용 — 처음엔 실행기가 앱을 켰으면 경고했으나, 지금은 누른 뒤 화면이 그대로면 알림). **탭 왕복 약 90ms(누름 60ms 포함)**, 도우미 준비 0.46초, 쓸기 0.36초 — XCUITest 탭 0.8~2.2초 |
 | **H2. 붙기만 하는 실행기** | `qakit serve --attach`: 앱은 simctl+AutoID로 켜고, 실행기는 화면 구조·조건 확인(wait·expect)만. `/dump`는 켠 앱이 없으면 떠 있는 앱에 붙어 읽음 (이 PR에 먼저 넣음) |
 | **H3. MCP 직접 터치 모드** ✅ | `QAKIT_TOUCH=direct`일 때만 (UI의 AI QA "직접 터치" 체크, 기본 켬 · 시나리오 만들기·터미널 MCP는 XCUITest 그대로). `launch`는 그대로(실행기가 켬 — 정정 참고). `tap`=대상(id·label·contains·type·index) → 화면 구조(바뀌었거나 5초 지나면 다시 읽음)에서 보이는 부분 가운데 → 직접 터치, 기록은 ID 단계(`do-steps`). expect는 누르기 전·후 `qakit do --no-record`로 확인, expect가 없으면 1.2초 안에 실시간 화면이 안 바뀌면 "무시됐을 수 있음" 경고. 화면에 없거나 밖이거나 도우미가 안 되면 XCUITest 탭으로 넘김, `via: xcuitest`로 고를 수도. 새 도구 `long_press`·`drag`(대상→대상 또는 방향)·`tap_point`(좌표) — 시나리오 단계가 없어 기록 안 함. 글자 입력은 그대로 XCUITest. **시뮬레이터 확인**: 검색 열기(expect) ✅, 뒤로 ✅, 변화 없는 탭 경고 ✅, 끌기로 스크롤 ✅, 길게 누르기 ✅. 탭 자체는 0.8~1.8초(화면 구조 읽기·expect 확인 포함), 터치 신호는 약 0.1초 |
 | **H4. 확인·화면** ✅ | 커서: 직접 터치는 실제로 누른 좌표(0~1) 그대로 `taps.jsonl`에 (`touch_mark`), 길게 누르기는 `press`→`press-done`("길게 누르기" 표시), 끌기는 `drag`(시작)→`drag-done`(끝, 0.5초 미끄러짐·"끌기" 표시). 라이브 세션: 도구 막대 **직접 터치 (실험)** 켜면 클릭=탭, 0.5초 넘게 꾹=길게 누르기, 끌기=끌기 → `POST /api/touch`(UI 서버가 터치 도우미 하나를 띄워 둠, 시나리오 실행·AI QA 중엔 거절). 탭이 요소 위이고 화면 구조가 지금 화면 것일 때만 그 단계를 기록 (터치 뒤·화면이 바뀐 뒤엔 다시 읽기 전까지 기록 안 함 — 옛 화면 요소로 잘못 기록하던 것 막음). **확인**: 브라우저(헤드리스 Chrome)에서 검색 열기·뒤로(단계 2개 기록 ✅), 끌기로 스크롤 ✅, 길게 누르기 ✅, 탭 왕복 약 90ms |
@@ -697,7 +702,91 @@ AI가 누르는 모든 동작이 ID·라벨 기반 시나리오 단계다 (좌�
 |---|---|
 | 비공개 API가 Xcode 업데이트로 바뀜 (tapflow도 Xcode 27에서 위치가 바뀌어 고침) | 실시간 화면처럼 안 되면 XCUITest 탭으로 자동 전환, 이유 표시 |
 | 직접 터치로 된 것이 XCUITest 재생에선 안 됨 (또는 반대) | 저장 전 XCUITest 재생 통과가 거름 |
-| AI QA 중 XCUITest로 켠 앱이 섞이면 터치가 조용히 무시됨 | 모드 시작 때 앱을 simctl로 다시 켜고, 탭 뒤 화면이 안 바뀌면 "터치가 무시됨"으로 알림 |
+| 직접 터치가 조용히 무시됨 (부팅마다 SimulatorHID·dtuhidd 중 어느 쪽이 받느냐로 갈림 — 켠 방식·새 기기·Device Hub 표시와 무관) | AI 직접 터치: 탭 뒤 1초 안에 화면이 안 바뀌면 알림, `expect`면 실패, `via: xcuitest`. `qakit touch`: 전후 화면을 비교해 알리고 아는 원인 안내 |
+
+## 맥 앱(DMG) 설계 — 다음 단계
+
+> 상태: D1 ✅ 쓰는 곳 분리, D2 ✅ 앱 셸, D3 ✅ 맥 기능·설정 창, D4 ✅ DMG, D5 ✅ 앱 안 업데이트 (2026-11-16). 남은 것: Developer ID 서명·공증(자격이 생기면), 앱 이름.
+
+### 왜
+
+지금은 `git clone` → `install-skill` → 터미널에서 `qakit ui`를 켜고 브라우저 탭으로 본다. Codex·Claude 데스크톱 앱처럼 **DMG를 받아 끌어 넣고, 더블클릭하면 창이 뜨는** 앱이면 터미널을 모르는 QA 담당자도 쓸 수 있고, 작업공간(앱마다 QA 폴더)을 창에서 고르고 바꿀 수 있다.
+
+### 방식 비교
+
+| 방식 | 크기 | 장점 | 단점 |
+|---|---|---|---|
+| **Swift 앱 + WKWebView (추천)** | 수 MB | 지금 웹 UI를 그대로 띄움. 맥 기본 기능(메뉴 막대·알림·파일 열기)을 바로 씀. 어차피 Xcode가 필요한 도구라 Swift 빌드가 자연스럽다 | 웹뷰 차이(내려받기·확인 창)를 손봐야 함 |
+| Tauri | 10MB 안팎 | 웹뷰 + Rust, 자동 업데이트 기본 제공 | Rust 도구가 하나 더 늘어남 |
+| Electron | 150MB 이상 | Chrome 그대로라 웹 차이가 없음 | 무겁다, Node 런타임을 통째로 넣음 |
+
+→ **Swift + WKWebView**. 서버(`qakit ui`)·실행기·AI 연결은 지금 Python 코드를 그대로 쓰고, 앱은 **창과 수명 관리만** 한다.
+
+### 구성
+
+```
+QA Kit.app
+└─ Contents/
+   ├─ MacOS/QAKit                  Swift 앱 (창·메뉴 막대·서버 띄우기)
+   └─ Resources/kit/               도구 폴더 통째 (bin·lib·Tools·Sources·ScenarioRunner·AndroidRunner·AutoID·ui/dist·skills·templates·VERSION)
+```
+
+- **창**: 작업공간 하나에 창 하나. 앱이 `kit/bin/qakit -w <작업공간> ui --no-open --port <고정>`을 띄우고, 출력의 주소(토큰 포함)를 WKWebView로 연다. 창을 닫거나 앱을 끄면 서버를 SIGINT로 멈춘다 (서버가 띄운 실행·AI·녹화도 같이 정리 — 지금 `qakit ui` 종료 처리 그대로).
+- **포트는 작업공간마다 고정**: 웹 UI 설정(테마·커서·탭 등)이 localStorage라 주소(포트)가 바뀌면 사라진다 → 작업공간 경로로 정한 포트를 쓰고, 쓰고 있으면 다음 번호.
+- **작업공간 고르기**: 처음 화면에 최근 작업공간 목록 + "폴더 열기"(`qakit.yml`이 있는 폴더). 없으면 `qakit init` 안내 (나중에 창에서 만들기).
+- **메뉴 막대 아이콘**: 열린 작업공간, 실행 중(시나리오·AI) 표시, 창 열기, 끝내기.
+- **처음 점검**: Xcode·xcodegen·python3·(안드로이드면 JDK·SDK)가 있는지 보고 없으면 설치 방법을 보여 준다 (`qakit doctor` 같은 점검 명령을 하나 두고 앱은 그 결과를 그림).
+- **명령줄·스킬**: 메뉴 "명령줄 도구 설치" → `~/.local/bin/qakit`을 앱 안 `kit/bin/qakit`으로 링크, Claude Code·Codex 스킬·MCP 설정도 앱 안 경로로 (`install-skill` 그대로). git으로 설치한 것이 있으면 어느 쪽을 쓸지 묻는다.
+
+### 꼭 바꿔야 하는 것 — 도구 폴더에 쓰지 않기
+
+서명한 앱 번들 안은 고치면 안 된다 (서명이 깨지고, `/Applications`는 쓰기 권한도 없을 수 있음). 지금은 도구 폴더(`KIT_DIR`) 안에 빌드 결과를 쓴다:
+
+- `.build/`(시나리오 실행기·AutoID·실기기 실행기·안드로이드 실행기 APK), `Tools/<도구>/.build/`(simscreen·simtouch), `ScenarioRunner/*.xcodeproj`(xcodegen 결과), `AndroidRunner/runner/build/`(Gradle)
+
+→ **쓰는 곳을 `QAKIT_HOME`(기본 `~/Library/Application Support/qakit`)으로 분리**. 읽기 전용 원본(`KIT_DIR`)과 쓰는 곳(`QAKIT_HOME`)을 나누고, Xcode·Gradle 프로젝트는 쓰는 곳에 복사해 빌드한다. git 설치에서는 지금처럼 `KIT_DIR`을 써도 되게 기본값만 다르게.
+
+### 업데이트
+
+- 1차: 앱이 켜질 때 GitHub 최신 릴리스 버전을 보고 새 버전이 있으면 "업데이트" → DMG 내려받기 페이지. (`qakit update`는 git 설치 전용으로 남김)
+- 2차: Sparkle(맥 앱 자동 업데이트 표준) — 릴리스에 appcast를 같이 올려 앱 안에서 받아 바꾼다.
+
+### 서명·공증
+
+- **Apple Developer ID(연 $99)가 있으면**: Developer ID로 서명 + hardened runtime + `notarytool` 공증 → 받은 사람이 바로 연다.
+- **없으면**: ad-hoc 서명. 처음 열 때 "확인되지 않은 개발자" 경고 → 우클릭 → 열기 (사내 몇 명이면 이걸로 충분).
+- 사용자 맥에서 만드는 도구(simscreen·simtouch·실행기)는 그 맥에서 빌드되므로 공증 대상이 아니다.
+
+### 배포
+
+`scripts/release.sh`에 이어서: 앱 빌드(`xcodebuild`, 도구 폴더를 Resources/kit로 복사) → DMG(`hdiutil create -format UDZO`, Applications 바로가기 포함) → (자격이 있으면) 서명·공증·staple → GitHub 릴리스에 `QA-Kit-<버전>.dmg` 첨부. CI(macOS 러너)에서 만들 수도 있다.
+
+### 단계
+
+| 단계 | 내용 |
+|---|---|
+| **D1. 쓰는 곳 분리** ✅ | `WORK_DIR` = `QAKIT_HOME` → 도구 폴더에 쓸 수 있으면(git 설치) 도구 폴더 그대로 → 아니면 `~/Library/Application Support/qakit`. 빌드 결과(`.build/`: 시나리오 실행기·실기기 실행기·AutoID·안드로이드 실행기·simscreen·simtouch·swiftui-ids)는 `WORK_DIR/.build`, 소스 폴더 안에 쓰는 빌드(xcodegen 프로젝트·SwiftPM·Gradle)는 그 부분만 `WORK_DIR/src`에 복사(`writable_src`, 바뀐 파일만·지운 파일은 지움)해 빌드. git 설치는 경로가 그대로라 다시 빌드하지 않음. **확인**: 도구 사본을 `chmod -R a-w`로 읽기 전용으로 두고 맥 기본 Python 3.9.6으로 — AutoID·시나리오 실행기 빌드 → `do launch`·`dump`·`run`(실패 사진·영상까지) ✅, simscreen 10초·simtouch 2초·안드로이드 실행기 47초·swiftui-ids 4분 44초 빌드 ✅, 도구 폴더에 쓴 파일 0 (쓸 수 있는 번들을 맥 기본이 아닌 Python으로 돌릴 때 생기던 `__pycache__`는 [시작 캐시](#주요-결정과-배운-것) 때 고침) |
+| **D2. 앱 셸** ✅ | `App/Sources`(AppKit + SwiftUI, swiftc 한 번에 빌드 — Xcode 프로젝트 없음) + `scripts/build-app.sh`(유니버설 바이너리, 도구 폴더를 Resources/kit로, ad-hoc 서명) → `dist/QA Kit.app`. 작업공간 고르기·최근 목록(Dock에 폴더 끌어 놓기도), 작업공간마다 창 하나·서버 하나(이미 열려 있으면 그 창), 포트는 작업공간마다 고정(UserDefaults). 창 닫기·앱 종료 = 서버 SIGINT(8초 뒤 SIGTERM·SIGKILL), 앱이 강제로 죽으면 서버가 부모를 보고 따라 꺼짐(`QAKIT_UI_PARENT`). 로그인 셸 PATH를 읽어 씀. WKWebView: 내려받기(`WKDownload` → ~/Downloads, blob·attachment 둘 다), alert·confirm·prompt, 새 창은 같은 세션의 작은 창(결과 파일은 쿠키 로그인이 필요), 바깥 링크는 기본 브라우저. 앱 번들 안 도구 폴더는 쓸 수 있어도 쓰지 않음(`.app/Contents/` → Application Support). **찾아 고친 것**: WebKit은 화면에서 빠진 `<img>`의 MJPEG 스트림을 끊지 않아 라이브 세션을 오갈 때마다 연결이 쌓이고, 서버당 6개를 채우면 화면이 검게 멈추고 화면 구조도 못 읽음 → 빠질 때 src를 빈 그림으로 + 서버는 스트림을 최근 3개만 두고 오래된 것을 끊음. **확인**: 실시간 화면 10~11 fps, 라이브 세션 8번 오가도 연결 3개 유지, 사진 내려받기, 창 닫기·⌘Q·kill -9 모두 서버·simscreen 정리 |
+| **D3. 맥 기능 · 설정 창** ✅ | **메뉴 막대 아이콘**: 열린 작업공간, 도는 것(시나리오 실행·AI·녹화)이 있으면 채운 아이콘 + "실행 중" — 서버의 `GET /api/busy`를 3초마다 (토큰은 `X-Qakit-Token` 헤더). 도는 중에 창 닫기·앱 종료는 먼저 묻기(설정에서 끔). **처음 점검**: `qakit doctor --system [--json]`(작업공간 없이 Python·Xcode·시뮬레이터·xcodegen·git / AI: claude·codex / 안드로이드: JDK·adb) — 필수가 빠지면 켤 때 설정의 환경 점검을 열고 처음 화면에도 경고, 설치 명령 복사. **명령줄·스킬**: `~/.local/bin/qakit`·Claude Code·Codex 스킬 링크가 이 앱 / 다른 곳(git 설치) / 없음인지 보여 주고, "이 앱으로 연결"(다른 곳이면 확인 후 `install-skill`)·"이 앱 연결 풀기"(앱을 가리키는 링크만). **설정 창(⌘,)**: 화면 크기 50~200%(슬라이더·버튼, 보기 메뉴 ⌘− ⌘0 ⌘+·⌘=, 모든 창 `pageZoom`), 메뉴 막대 아이콘 켜기·끄기, 실행 중 확인, 버전·도구 폴더·빌드 결과 위치. 앱 안 qakit에서 `qakit update`는 막고 릴리스 안내 |
+| **실시간 화면 속도** ✅ | simscreen을 하드웨어 JPEG(VideoToolbox, GPU 축소)로: 한 장 24ms → 7ms, CPU 약 1/7. 상한 24 → 60fps. 화면 포트 재확인이 3초 중 1초 동안 매 장 돌던 것(장마다 6~10ms)을 3초에 한 번으로. AI 탭 실시간 화면도 화면에서 빠질 때 스트림을 끊게 (WebKit 연결 누수). 다음 후보: SimulatorKit 프레임 콜백(폴링 없이 새 프레임마다), H.264 + WebCodecs(대역폭·지연↓) |
+| **실시간 화면 프레임 콜백** ✅ | SimulatorKit을 뜯어보니 Simulator 앱도 CoreSimulator `SimScreen`의 `registerScreenCallbacksWithUUID:callbackQueue:frameCallback:…`로 새 장면을 받는다 → simscreen이 SimulatorKit 없이 같은 콜백을 직접 등록. 메인 런루프가 돌아야 콜백이 와서 메인은 런루프만, 인코딩은 별도 스레드. 콜백이 끊기면(세 번) 폴링으로, 기기 재시작은 IOSurface ID로 알아채 다시 등록. 상한은 시작 시각 기준(끝난 시각으로 재면 간격이 인코딩 시간만큼 늘어남). **측정**(쉬지 않는 60Hz 애니메이션, 10초): 폴링 486~492장(약 49fps, 간격 중앙값 20.5ms) → 콜백 597장(60fps, 16.6ms, 99% 21ms). 서버를 거쳐 약 59fps, CPU는 Python 서버 1.8%·simscreen 13%. 시험용 기기 재시작 5번 중 4번 바로 회복(1번은 만든 직후 첫 재부팅) |
+| **D4. 패키징** ✅ | 앱 아이콘(`scripts/make-icon.swift` → `App/AppIcon.icns`), `scripts/build-dmg.sh`(QA Kit.app + Applications 바로가기, UDZO, `hdiutil verify`), `QAKIT_SIGN_ID`가 있으면 Developer ID + hardened runtime 서명, `QAKIT_NOTARY_PROFILE`이 있으면 notarytool 공증 + staple, 없으면 ad-hoc. `release.sh`가 릴리스 뒤 DMG를 만들어 붙이고 노트에 설치·허용 안내 (`--no-dmg`로 끔, 실패해도 릴리스는 그대로·다시 붙이는 명령 안내). CI가 DMG까지 만들어 확인. **확인**: DMG 1.3MB, 붙여서 꺼낸 앱이 저장소 밖에서 켜지고 서버·실시간 화면 정상(버전 0.48.0), ad-hoc + 격리 속성이면 Gatekeeper `rejected` → 처음 열 때 허용 안내. Developer ID가 생기면 환경 변수만 넣으면 된다 |
+| **D5. 업데이트** ✅ | `App/Sources/Updater.swift`: GitHub `releases/latest`를 켤 때 하루 한 번(설정에서 끔)·메뉴 "업데이트 확인…" → 새 버전이면 처음 화면·메뉴 막대·설정에 표시. "업데이트하고 다시 켜기" = DMG 받기(진행 표시) → `hdiutil attach` → 임시 폴더로 꺼내기 → 번들 ID·버전·`codesign --verify`(지금 앱이 Developer ID면 같은 팀인지도) 확인 → 앱을 끄고(도는 작업이 있으면 평소처럼 묻기) 끝난 뒤 셸이 옛 앱을 옆으로 옮기고 새 앱을 넣고 다시 켬(실패하면 되돌림). 앱이 직접 받은 파일이라 격리 속성이 없어 다시 허용할 필요 없음. 저장소 안·`QAKIT_KIT` 개발용 앱은 바꾸지 않고 릴리스 페이지만. Sparkle은 서명·appcast가 필요해 Developer ID가 생기면 다시 본다. **확인**: 0.48.0으로 만든 앱이 실제 v0.49.0 릴리스를 찾아 8초 만에 바꾸고 다시 켜짐, 격리 속성 0, 옛 앱·임시 폴더·DMG 정리 |
+
+### 확인할 것 · 위험
+
+| 항목 | 내용 |
+|---|---|
+| Python 버전 | 맥 기본 `/usr/bin/python3`는 3.9.6 (Xcode 명령줄 도구) → **D1에서 확인 ✅**: 단위 테스트 전부·빌드·실행이 3.9.6에서 동작. 최소 3.9로 두고, 3.10 이상 문법을 쓰지 않게 (CI에 3.9 추가 고려) |
+| WKWebView 차이 | 실시간 화면(MJPEG `<img>`), 녹화·사진 내려받기, `window.confirm` — Safari 엔진에서 확인 필요 |
+| git 설치와 둘 다 있을 때 | MCP·스킬이 가리키는 `qakit`이 어느 쪽인지 섞일 수 있음 → 앱이 지금 연결된 쪽을 보여 주고 바꾸게 |
+| 여러 창 | 같은 작업공간을 두 창에서 열면 서버 둘 → 이미 열려 있으면 그 창으로 |
+
+### 정할 것
+
+- Apple Developer ID가 있는가 (없으면 ad-hoc 서명으로 시작)
+- 앱 이름 (예: QA Kit)
+- git 설치를 계속 함께 지원할지 (추천: 개발자는 git, 그 외는 앱)
 
 ## 단계와 결과
 
@@ -716,8 +805,14 @@ AI가 누르는 모든 동작이 ID·라벨 기반 시나리오 단계다 (좌�
 | 9. UI | `qakit ui` ([설계](#ui-설계-다음-단계)) | U1~U5 ✅, 실시간 화면·커서·캡처 ✅ |
 | 10. AI QA | AI가 MCP로 앱을 직접 QA ([설계](#ai-qa-설계-다음-단계)) | A1 ✅ (`qakit mcp`, 실제 Claude Code에서 확인) · A2 ✅ (라이브 세션 AI 활동) · A3 ✅ (UI에서 AI QA 시작, 실제 Claude Code로 끝까지) · A4 ✅ (지난 세션·통과 단계 → 시나리오) |
 | 11. AI QA 직접 터치 | tapflow 방식 — 앱은 simctl, 실행기는 읽기만, 누르기는 터치 신호 ([설계](#ai-qa-직접-터치-설계--tapflow-방식-다음-단계)) | 시험 ✅ · AutoID ✅ · H1 ✅ · H3 ✅ · H4 ✅ |
+| 12. 맥 앱(DMG) | 더블클릭으로 여는 앱, 웹 UI를 창으로 ([설계](#맥-앱dmg-설계--다음-단계)) | D1 ✅ (읽기 전용 도구 폴더 + Python 3.9), D2 ✅ (앱 셸 `scripts/build-app.sh`), D3 ✅ (메뉴 막대·처음 점검·명령줄·스킬·설정 창), D4 ✅ (DMG·릴리스 첨부), D5 ✅ (앱 안 업데이트). 남은 것: Developer ID 서명·공증 |
 
 ## 주요 결정과 배운 것
+
+- **언어는 그대로 (Rust 검토, 2026-11-16)**: 느린 곳은 언어가 아니라 바깥 도구다. 실측 — 60fps 실시간 화면 중계 때 CPU는 Python 서버 1.8%·simscreen(Swift+하드웨어 인코딩) 13%, 버벅임은 폴링 박자 문제였다(프레임 콜백으로 해결). 조작은 XCUITest·xcodebuild·시뮬레이터가 수백 ms~수 초이고 Python 몫은 명령 시작 170ms(그중 61ms는 소스 8.8천 줄 매번 컴파일 — → 아래 시작 캐시로 약 75ms, MCP는 서버가 떠 있어 한 번만). 웹 UI를 Rust/WASM으로 바꿔도 DOM 조작은 JS를 거치고 화면 디코딩은 브라우저 몫이라 이득이 없다. → 전체 재작성 대신 무거운 부분만 네이티브(simscreen·simtouch는 Swift)로 두는 지금 방식을 유지.
+- **시작 캐시 (2026-11-17)**: `bin/qakit`이 `lib/qakit/*.py`(1만 줄)를 명령마다 컴파일하던 것을 import와 같은 `.pyc`로 캐시한다 (`importlib.machinery.SourceFileLoader.get_code` — 원본의 수정 시각·크기가 바뀌면 다시 컴파일, 쓰기는 원자적, 오류 위치는 원본 파일·줄 그대로). `--version`의 git은 그 옵션을 줄 때만 띄운다. 명령 시작(`qakit --version` 20번 중앙값): Python 3.14 138.7 → 76.1ms, 맥 기본 3.9 121.1 → 72.1ms, 앱 번들 안 도구 폴더 79ms. 캐시 읽기는 13개 합쳐 4.7ms이고, 남은 시간은 Python 자체 22ms·표준 라이브러리 import 약 30ms·argparse 명령 트리 약 15~20ms(3.14는 색상 모듈 `_colorize`까지 불러옴) — 더 줄이려면 import와 명령 트리를 필요할 때만 만드는 구조 변경이 든다. **함께 고친 것**: ① 앱 번들 안 도구 폴더를 맥 기본이 아닌 Python(Homebrew 등)으로 돌리면 `Tools/`의 모듈 import가 번들 안에 `__pycache__`를 써서 서명이 깨졌다(`codesign --verify`: a sealed resource is missing or invalid). D1 확인은 `chmod -R a-w`한 사본이라 드러나지 않았다(읽기 전용이면 Python이 조용히 건너뜀) — 끌어다 놓은 앱은 내 소유라 쓰기가 된다. 맥 기본 Python은 원래 `~/Library/Caches/com.apple.python`에 써서 괜찮았다. → 번들 안이거나 쓸 수 없는 도구 폴더면 `sys.pycache_prefix`를 `~/Library/Caches/qakit/pycache`로(표준 `PYTHONPYCACHEPREFIX`와 같은 방식이라 표준 라이브러리 것도 그리로 — 첫 실행 때 한 번, 약 2MB), 이미 정해 둔 위치가 있으면 그대로. CI가 번들 안 qakit을 두 Python으로 돌린 뒤 `__pycache__`가 없고 서명이 맞는지 본다. ② 저장소가 아닌 설치(앱 번들)에서 `qakit --version`이 `qakit 0.56.0 (fatal: … 깃 저장소가 아닙니다: .git)`로 찍혔다(git 오류가 출력에 섞여 브랜치 자리로) → 실패하면 브랜치를 붙이지 않는다.
+- **doctor 시간 제한 (2026-11-17)**: CI의 `test_app.DoctorSystem`이 가끔 60초를 넘겨 실패했다(#111·#112, 성공 때는 6초) — 맥 러너에서 시뮬레이터 서비스가 뜨는 동안 `xcrun simctl list`가 멈추고, `doctor`는 바깥 명령을 시간 제한 없이 기다렸다. 맥 앱의 처음 점검도 같은 명령이라 사용자 맥에서는 "점검하는 중…"에서 넘어가지 않을 수 있었다. → `xcodebuild`·`simctl`·`java_home`을 동시에 돌리고 각각 `--timeout`(기본 20초)까지만 기다린다. 넘기면 그 항목만 `unknown`(확인 못 함)으로 "없음"과 따로 센다(JSON `problems`는 없는 것만, `unknown`은 따로). 맥 앱은 주황 물음표와 "확인하지 못했습니다 — 다시 점검". 작업공간 `doctor`의 Xcode·시뮬레이터·앱 설치 확인도 같은 제한. `xcrun`은 도구로 exec해서(같은 PID) 시간 초과로 끝낼 때 도구도 같이 끝난다 — 고아 프로세스 없음. 덤으로 `fail()`이 오류를 찍기 전에 표준 출력을 비워, 파이프로 받을 때(AI·앱) 오류가 목록보다 먼저 나오던 것도 고쳤다. 안드로이드 doctor도 같게: `java_home`·`emulator -list-avds`·`adb devices`를 동시에 각각 제한(adb 서버가 멈추면 `adb devices`가 끝나지 않는다 — 안내는 `adb kill-server`), 작업공간 doctor는 AVD·기기 목록을 한 번만 읽고(전에는 AVD 목록을 세 번) 에뮬레이터 찾기(`adb emu avd name`)·앱 설치 확인(`adb shell pm path`)도 제한, `adb devices`가 멈췄으면 에뮬레이터 찾기에서 다시 기다리지 않는다.
+- **MCP 기기 찾기 시간 제한 (2026-11-17)**: MCP 세션은 첫 조작(장면 보관 시작)·사진 때 `xcrun simctl list`(안드로이드는 `adb devices`)로 기기를 찾는데 시간 제한이 없어, 시뮬레이터 서비스가 뜨는 중이면 AI 도구 호출이 그대로 멈췄다 — CI의 `test_mcp.Protocol.test_session`이 12~75초로 들쭉날쭉했던 원인(멈춘 simctl을 두면 30초). → 명령 하나당 10초(`QAKIT_SIMCTL_TIMEOUT`)까지만 기다리고, 넘기면 그 호출은 기기 없이 넘긴 뒤 다음 조작 때 다시 찾는다(장면 보관도 기기를 찾았을 때만 시작). 시나리오 이름 확인 같은 기기와 상관없는 오류는 바로 돌려준다. 테스트는 멈추는 가짜 `xcrun`과 1초 제한으로 돌려 러너의 simctl과 상관없다.
 
 - **AI는 만들 때만**: 실행·복구는 파일(시나리오, Swift, 노트)만으로. computer use처럼 매번 토큰을 쓰지 않는다.
 - **QA는 앱 레포의 전용 워크트리에**: 개발 폴더와 섞이지 않게. git에 없는 작은 로컬 설정 파일(키가 든 xcconfig 등)은 원래 폴더에서 복사해야 새 워크트리가 빌드된다.

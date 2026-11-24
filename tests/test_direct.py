@@ -1,4 +1,6 @@
 """AI QA 직접 터치 (H3): 대상 찾기·expect 조건·화면 변화 판단·도구 목록 (시뮬레이터 없이)"""
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -6,6 +8,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import QAKIT, load_qakit, make_workspace
 
@@ -58,6 +61,16 @@ class Change(unittest.TestCase):
         self.assertFalse(self.ring([(1, 1000)]).wait_change(time.time(), timeout=0.2))
 
 
+class Gesture(unittest.TestCase):
+    def test_steps(self):
+        self.assertEqual(q.gesture_step("long_press", {"target": "a.b"}), "long-press: a.b")
+        self.assertEqual(q.gesture_step("long_press", {"target": {"label": "카드"}, "seconds": 2}),
+                         'long-press: { on: { label: "카드" }, seconds: 2 }')
+        self.assertEqual(q.gesture_step("drag", {"from": "list"}), "drag: { from: list, dir: up }")
+        self.assertEqual(q.gesture_step("drag", {"from": "a", "to": "b", "seconds": 1}), "drag: { from: a, to: b, seconds: 1 }")
+        self.assertEqual(q.gesture_step("drag", {"from": "a", "dir": "down", "distance": 0.5}), "drag: { from: a, dir: down, distance: 0.5 }")
+
+
 class Mark(unittest.TestCase):
     def test_touch_mark(self):
         tmp, root = make_workspace()
@@ -73,6 +86,77 @@ class Mark(unittest.TestCase):
             tmp.cleanup()
 
 
+class TouchCheck(unittest.TestCase):
+    """qakit touch: 답이 ok여도 터치가 조용히 무시될 수 있어 누른 뒤 화면이 바뀌었는지 본다"""
+
+    def touch(self, before, after, runner=None):
+        class Helper:
+            mode = "digitizer"
+            def __init__(self, ws, udid): pass
+            def start(self): return None
+            def send(self, line): return True, "ok tap 90"
+            def stop(self): pass
+        shots = iter([before, after])
+        with mock.patch.object(q, "find_workspace", return_value=mock.Mock(device=None)), \
+                mock.patch.object(q, "ensure_booted", return_value="UDID"), \
+                mock.patch.object(q, "DirectTouch", Helper), \
+                mock.patch.object(q, "screen_jpeg", side_effect=lambda *a, **k: next(shots)), \
+                mock.patch.object(q, "serve_load", return_value=runner), \
+                mock.patch.object(q, "serve_alive", return_value=True), \
+                mock.patch.object(q.time, "sleep"), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            q.cmd_touch(mock.Mock(workspace=None, action=["tap", "0.5", "0.5"]))
+        return out.getvalue()
+
+    def test_alike(self):
+        self.assertTrue(q.screens_alike(b"x" * 1000, b"x" * 1015))     # 시계·깜박임 정도
+        self.assertFalse(q.screens_alike(b"x" * 1000, b"x" * 1300))    # 화면 전환
+
+    def test_ignored_and_changed(self):
+        out = self.touch(b"x" * 1000, b"x" * 1005)
+        self.assertIn("화면이 그대로", out)
+        self.assertNotIn("serve --stop", out)                           # 상주 실행기가 없으면 그 안내는 안 함
+        self.assertIn("serve --stop", self.touch(b"x" * 1000, b"x" * 1005, runner={"pid": 1}))
+        self.assertIn("터치가 먹혔습니다", self.touch(b"x" * 1000, b"x" * 1400))
+        self.assertNotIn("XCUITest가 켠 앱은", self.touch(b"x" * 1000, b"x" * 1400, runner={"pid": 1}))   # 켠 방식으로 미리 경고하지 않음
+
+
+class RunnerSynth(unittest.TestCase):
+    """좌표 터치: 상주 실행기가 같은 코드로 떠 있으면 XCTest 이벤트 합성(/touch), 아니면 simtouch"""
+
+    def test_body(self):
+        b = q.RunnerTouch.body
+        self.assertEqual(b("tap 0.5 0.4 80"), {"action": "tap", "x": 0.5, "y": 0.4, "ms": 80.0})
+        self.assertEqual(b("tap 0.5 0.4")["ms"], 60)
+        self.assertEqual(b("press 0.1 0.2 1.5"), {"action": "press", "x": 0.1, "y": 0.2, "seconds": 1.5})
+        self.assertEqual(b("swipe 0.5 0.8 0.5 0.2 0.3")["x2"], 0.5)
+        self.assertIsNone(b("down 0.5 0.5"))   # 손가락을 나눠 보내는 명령은 simtouch만
+        self.assertIsNone(b("tap x y"))
+
+    def test_choice(self):
+        class Sim:
+            mode = "digitizer"
+            def __init__(self, udid): self.sent = []
+            def send(self, cmd, timeout=None): self.sent.append(cmd); return True, "ok tap 90"
+            def stop(self): pass
+        with mock.patch.object(q, "TouchHelper", Sim):
+            t = q.DirectTouch(mock.Mock(), "UDID")
+            with mock.patch.object(t.runner, "start", return_value=None), \
+                    mock.patch.object(t.runner, "send", return_value=(True, "ok tap 120")) as rs:
+                self.assertEqual(t.tap(0.5, 0.5), (True, "ok tap 120"))
+                self.assertEqual(t.mode, "synth")
+                rs.assert_called_once()
+            with mock.patch.object(t.runner, "start", return_value="상주 실행기 없음"):
+                self.assertEqual(t.tap(0.5, 0.5), (True, "ok tap 90"))   # 실행기가 없으면 simtouch
+                self.assertEqual(t.mode, "digitizer")
+            with mock.patch.object(t.runner, "start", return_value=None), \
+                    mock.patch.object(t.runner, "send", return_value=(False, "상주 실행기 연결 실패: refused")):
+                self.assertEqual(t.tap(0.5, 0.5)[1], "ok tap 90")         # 실행기에 못 붙으면 simtouch로
+            with mock.patch.object(t.runner, "start", return_value=None), \
+                    mock.patch.object(t.runner, "send", return_value=(False, "이벤트 합성 실패: x")):
+                self.assertEqual(t.tap(0.5, 0.5), (False, "이벤트 합성 실패: x"))   # 실행기가 답한 실패는 그대로
+
+
 class Tools(unittest.TestCase):
     def tools(self, env):
         tmp, root = make_workspace()
@@ -80,20 +164,24 @@ class Tools(unittest.TestCase):
             p = subprocess.run([sys.executable, str(QAKIT), "-w", str(root), "mcp"], text=True, capture_output=True, timeout=30,
                                env={**os.environ, **env}, input="\n".join(json.dumps(m) for m in [
                                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-                                   {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-                                   {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "drag", "arguments": {}}}]) + "\n")
+                                   {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+                                   # 직접 터치 모드에선 조작 도구를 부르지 않는다 (진짜 시뮬레이터를 찾아 누름)
+                                   + ([] if env.get("QAKIT_TOUCH") == "direct" else [
+                                       {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "tap_point", "arguments": {"x": 1, "y": 1}}}])) + "\n")
             out = [json.loads(x) for x in p.stdout.splitlines()]
-            return {t["name"]: t for t in out[1]["result"]["tools"]}, out[2]["result"]
+            return {t["name"]: t for t in out[1]["result"]["tools"]}, (out[2]["result"] if len(out) > 2 else None)
         finally:
             tmp.cleanup()
 
     def test_direct_only_when_asked(self):
         plain, call = self.tools({"QAKIT_TOUCH": ""})
-        self.assertEqual(len(plain), 18)
+        self.assertEqual(len(plain), 21)
+        self.assertIn("long_press", plain)   # 길게 누르기·끌기는 XCUITest로도 (시나리오 단계)
+        self.assertNotIn("tap_point", plain)
         self.assertNotIn("via", plain["tap"]["inputSchema"]["properties"])
-        self.assertTrue(call["isError"])   # 직접 터치가 아니면 제스처 도구는 거절
+        self.assertTrue(call["isError"])   # 직접 터치가 아니면 좌표 탭은 거절
         direct, _ = self.tools({"QAKIT_TOUCH": "direct"})
-        self.assertEqual(len(direct), 21)
+        self.assertEqual(len(direct), 22)
         for n in ("long_press", "drag", "tap_point"):
             self.assertIn(n, direct)
         self.assertIn("via", direct["tap"]["inputSchema"]["properties"])

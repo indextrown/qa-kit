@@ -18,7 +18,9 @@ def ensure_autoid(ws):
 
 
 SWIFTUI_IDS_DIR = KIT_DIR / "Tools" / "swiftui-ids"
-SWIFTUI_IDS_BIN = SWIFTUI_IDS_DIR / ".build" / "release" / "swiftui-ids"
+# git 설치는 지금처럼 패키지 안 .build (옮기면 SwiftSyntax를 다시 몇 분 빌드), 아니면 WORK_DIR
+SWIFTUI_IDS_SCRATCH = SWIFTUI_IDS_DIR / ".build" if WORK_DIR == KIT_DIR else BUILD_DIR / "swiftui-ids"
+SWIFTUI_IDS_BIN = SWIFTUI_IDS_SCRATCH / "release" / "swiftui-ids"
 
 
 def ensure_swiftui_ids():
@@ -32,7 +34,8 @@ def ensure_swiftui_ids():
     stamp = SWIFTUI_IDS_BIN.with_suffix(".stamp")
     if not SWIFTUI_IDS_BIN.exists() or not stamp.exists() or stamp.read_text().strip() != digest:
         info("swiftui-ids 도구 빌드 중... (처음엔 SwiftSyntax 컴파일로 몇 분 걸립니다)")
-        r = run(["swift", "build", "-c", "release", "--package-path", str(SWIFTUI_IDS_DIR)], check=False)
+        pkg = writable_src("Tools/swiftui-ids") / "Tools" / "swiftui-ids"   # Package.resolved를 고칠 수 있게
+        r = run(["swift", "build", "-c", "release", "--package-path", str(pkg), "--scratch-path", str(SWIFTUI_IDS_SCRATCH)], check=False)
         if r.returncode != 0 or not SWIFTUI_IDS_BIN.exists():
             fail("swiftui-ids 빌드 실패", (r.stdout or "")[-800:])
         stamp.write_text(digest)
@@ -42,7 +45,7 @@ def ensure_swiftui_ids():
 def ensure_swift_tool(name):
     """Tools/<name>/<name>.swift 한 파일짜리 도구를 소스가 바뀌었을 때만 swiftc로 빌드 (몇 초). 안 되면 None."""
     src = KIT_DIR / "Tools" / name / f"{name}.swift"
-    out = KIT_DIR / "Tools" / name / ".build" / name
+    out = (KIT_DIR / "Tools" / name / ".build" / name) if WORK_DIR == KIT_DIR else BUILD_DIR / "tools" / name / name
     if not src.exists():
         return None
     digest = hashlib.sha1(src.read_bytes()).hexdigest()
@@ -61,9 +64,31 @@ def ensure_simscreen():
     return ensure_swift_tool("simscreen")
 
 
+def screen_jpeg(udid, width=440):
+    """시뮬레이터 화면 한 장 → 작은 JPEG 바이트 (simscreen, 안 되면 simctl 스크린샷). 못 읽으면 None."""
+    tmp = Path(tempfile.mkstemp(suffix=".jpg")[1])
+    try:
+        tool = ensure_simscreen()
+        if tool and run([str(tool), udid, "--once", str(tmp), "--width", str(width)], check=False).returncode == 0:
+            return tmp.read_bytes()
+        if run(["xcrun", "simctl", "io", udid, "screenshot", "--type=jpeg", str(tmp)], check=False).returncode == 0:
+            return tmp.read_bytes()
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def screens_alike(a, b, ratio=0.02):
+    """두 화면이 사실상 같은가 — JPEG 크기 차이가 ratio 이하 (qakit ui의 '화면이 바뀜' 판단과 같은 기준:
+    시계·커서 깜박임은 2% 미만, 화면 전환은 3~51%)."""
+    return abs(len(a) - len(b)) <= max(len(a), len(b)) * ratio
+
+
 class TouchHelper:
     """시뮬레이터에 터치 신호를 직접 넣는 도우미(simtouch)를 계속 띄워 두고 한 줄 명령을 보낸다 (AI QA 직접 터치).
-    좌표는 화면 대비 0~1. XCUITest가 켠 앱은 이 신호를 무시하므로, 앱은 simctl로 켜고 실행기는 붙기만 해야 한다."""
+    좌표는 화면 대비 0~1. XCUITest가 켠 앱에서도 먹히지만, 부팅에 따라 시뮬레이터 안에서 이 경로가 막혀 조용히
+    무시될 때가 있어(docs/private-apis.md) 쓰는 쪽이 누른 뒤 화면 변화를 본다. 상주 실행기가 떠 있으면 DirectTouch가
+    이 대신 실행기의 XCTest 이벤트 합성(/touch)을 쓴다 (늘 먹힘)."""
 
     def __init__(self, udid, tool=None, ready_timeout=15):
         self.udid, self.tool, self.ready_timeout = udid, tool, ready_timeout

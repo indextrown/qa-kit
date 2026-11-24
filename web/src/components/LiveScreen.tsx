@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { StreamImg } from "./StreamImg";
 
 const hex = (n: number) => n.toString(16).padStart(2, "0");
 
@@ -92,8 +93,9 @@ export function LiveScreen({ streamKey, className, style, onSize, onError, alt }
     return () => { alive = false; ctrl.abort(); try { decoder?.close(); } catch { /* 이미 닫힘 */ } };
   }, [mode, streamKey]);
 
-  if (mode === "h264") return <canvas ref={canvas} className={className} style={style} aria-label={alt} />;
-  return <img key={String(streamKey)} src={`/api/stream?k=${streamKey}`} alt={alt} className={className} draggable={false} style={style}
+  if (mode === "h264") return <canvas ref={canvas} className={`select-none ${className ?? ""}`} style={style} aria-label={alt} />;
+  // MJPEG는 StreamImg로: 화면에서 빠질 때 스트림을 직접 끊는다 (WebKit 연결 쌓임 방지)
+  return <StreamImg key={String(streamKey)} src={`/api/stream?k=${streamKey}`} alt={alt} className={className} style={style}
     onLoad={(e) => { const { naturalWidth: w, naturalHeight: h } = e.currentTarget; if (w && h) onSize?.(w, h); }}
     onError={onError} />;
 }

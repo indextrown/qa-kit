@@ -8,16 +8,25 @@ on:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: macos-latest, python: system }   # 맥 기본 /usr/bin/python3 (3.9) — 맥 앱이 이걸로 돈다, 3.10 이상 문법 금지
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        if: matrix.python != 'system'
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
+      - name: 파이썬 고르기
+        run: echo "PY=$([ '${{ matrix.python }}' = system ] && echo /usr/bin/python3 || echo python)" >> "$GITHUB_ENV"
       - name: 컴파일
-        run: python -m py_compile bin/qakit lib/qakit/*.py Tools/gen-ids/gen_ids.py Tools/scenario/scenario_tools.py
+        run: $PY --version && $PY -m py_compile bin/qakit lib/qakit/*.py Tools/gen-ids/gen_ids.py Tools/scenario/scenario_tools.py
       - name: 단위 테스트
-        run: python -m unittest discover -s tests -v
+        run: $PY -m unittest discover -s tests -v
 
   web:
     runs-on: ubuntu-latest
@@ -41,3 +50,29 @@ jobs:
           for f in $(grep -o 'assets/[^"]*' ui/dist/index.html); do
             git ls-files --error-unmatch "ui/dist/$f" >/dev/null || { echo "::error::커밋 안 된 빌드 파일: ui/dist/$f"; exit 1; }
           done
+
+  mac-app:   # 맥 앱 셸(App/)이 컴파일되고 번들·DMG가 만들어지는지 (켜 보는 확인은 손으로)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 화면·터치 도구 컴파일 (사용자 맥에서 처음 쓸 때 빌드되는 것)
+        run: |
+          for t in simscreen simtouch; do xcrun swiftc -O "Tools/$t/$t.swift" -o "/tmp/$t"; done
+          xcrun swiftc -O scripts/sim-probe.swift -o /tmp/sim-probe   # 비공개 API 조사 도구 (docs/private-apis.md)
+          xcrun swiftc -O scripts/objc-dump.swift -o /tmp/objc-dump   # (docs/reverse-engineering.md)
+          python3 -m py_compile scripts/macho-tools.py
+      - name: 앱·DMG 만들기
+        run: scripts/build-dmg.sh
+      - name: 번들 확인
+        run: |
+          APP="dist/QA Kit.app"
+          lipo -archs "$APP/Contents/MacOS/QAKit"
+          plutil -lint "$APP/Contents/Info.plist"
+          test -x "$APP/Contents/Resources/kit/bin/qakit"
+          test -f "$APP/Contents/Resources/kit/ui/dist/index.html"
+          test -f "$APP/Contents/Resources/AppIcon.icns"
+          codesign --verify --strict "$APP"
+          /usr/bin/python3 "$APP/Contents/Resources/kit/bin/qakit" --version
+          python3 "$APP/Contents/Resources/kit/bin/qakit" --version   # 맥 기본이 아닌 Python도 번들 안에 .pyc를 쓰면 안 된다
+          test -z "$(find "$APP" -name __pycache__)" && codesign --verify --strict "$APP"
+          hdiutil verify "dist/QA-Kit-$(cat VERSION).dmg"

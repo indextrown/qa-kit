@@ -5,6 +5,9 @@
 def cmd_update(args):
     """설치한 도구 폴더를 원격의 최신으로 받는다 (git fast-forward만). 명령·스킬은 링크라 그대로 바뀐다."""
     repo = KIT_DIR
+    if ".app/Contents/" in str(repo):   # 맥 앱 안 도구 (위에 저장소가 있어도 그건 앱이 아님)
+        fail("맥 앱 안의 qakit은 앱을 새 버전으로 바꿔 업데이트합니다.",
+             "https://github.com/indextrown/qa-kit/releases 에서 새 버전 받기")
     if git(repo, "rev-parse", "--git-dir") is None:
         fail(f"{repo}는 git 저장소가 아닙니다.", "git clone으로 설치한 경우만 qakit update를 쓸 수 있습니다")
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
@@ -109,18 +112,30 @@ def enable_timing():
     atexit.register(report)
 
 
+class _VersionAction(argparse.Action):
+    """qakit --version. git 브랜치는 이 옵션을 줄 때만 읽는다 (예전엔 명령마다 git을 띄웠다).
+    저장소가 아닌 설치(맥 앱 번들)는 브랜치를 붙이지 않는다 — git 오류 문구가 브랜치 자리에 찍히던 것."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        version = (KIT_DIR / "VERSION").read_text().strip() if (KIT_DIR / "VERSION").exists() else "dev"
+        branch = git(KIT_DIR, "rev-parse", "--abbrev-ref", "HEAD")
+        print(f"qakit {version}" + (f" ({branch})" if branch and branch != "HEAD" else ""))
+        parser.exit()
+
+
 def main():
     if os.environ.get("QAKIT_TIMING"):
         enable_timing()
     parser = argparse.ArgumentParser(prog="qakit", description="AI용 XCUITest 도구")
-    version = (KIT_DIR / "VERSION").read_text().strip() if (KIT_DIR / "VERSION").exists() else "dev"
-    branch = run(["git", "-C", str(KIT_DIR), "rev-parse", "--abbrev-ref", "HEAD"], check=False).stdout.strip()
-    parser.add_argument("--version", action="version",
-                        version=f"qakit {version}" + (f" ({branch})" if branch and branch != "HEAD" else ""))
+    parser.add_argument("--version", action=_VersionAction, help="버전(과 설치 폴더의 git 브랜치) 표시")
     parser.add_argument("-w", "--workspace", help="작업공간 경로 (기본: 현재 폴더에서 qakit.yml 탐색)")
     parser.add_argument("--app", help="앱 경로 일시 지정 (다른 워크트리/브랜치 폴더 검증용)")
-    parser.add_argument("--build", choices=["debug", "release"], default="debug",
-                        help="빌드 종류 (기본 debug = qakit.yml app.configuration, release = app.release.configuration 기본 Release)")
+    parser.add_argument("--build", choices=["debug", "release"], default=None,
+                        help="빌드 종류 (기본 debug = qakit.yml app.configuration, release = app.release.configuration 기본 Release. "
+                             "ui는 주지 않으면 그 작업공간에서 마지막으로 연 빌드)")
     device_help = "실기기에서 실행: select(방향키로 고르기, 값 생략 시) · last(지난번 기기) · <기기 이름>"
     parser.add_argument("--device", nargs="?", const="select", default=None, metavar="기기", help=device_help)
     parser.add_argument("--secrets", help="비밀값 파일 직접 지정 (기본: qakit.yml의 secrets). 계정을 바꿔 돌릴 때")
@@ -156,7 +171,7 @@ def main():
 
     p = sub.add_parser("do", help="시나리오 단계 하나를 바로 실행 (상주 실행기, 없으면 띄움). 예) qakit do 'tap: X' / dump / launch / reset")
     p.add_argument("step", nargs="+",
-                   help="단계(시나리오 문법) 또는 dump · launch · ping · reset · steps(기록 보기) · save <이름>(기록으로 시나리오 초안)")
+                   help="단계(시나리오 문법) 또는 dump · launch · ping · reset · steps(기록 보기) · save <이름>(기록으로 시나리오 초안) · restore [이름](launch로 비운 이전 기록 되살리기)")
     p.add_argument("--force", action="store_true", help="save: 같은 이름의 시나리오가 있어도 덮어씀")
     p.add_argument("--no-record", action="store_true", help="통과해도 기록하지 않음 (확인용 — AI QA 직접 터치가 씀)")
     p.add_argument("--title", help="save: 시나리오 제목 (name:)")
@@ -166,7 +181,7 @@ def main():
     p.add_argument("--settle", type=float, default=0.5, help="dump 전에 기다릴 시간(초)")
     p.set_defaults(func=cmd_do)
 
-    p = sub.add_parser("touch", help="시뮬레이터에 터치 신호를 직접 넣기 (확인용, AI QA 직접 터치). 좌표는 화면 대비 0~1. 예) qakit touch tap 0.5 0.9")
+    p = sub.add_parser("touch", help="시뮬레이터에 터치 신호를 직접 넣기 (확인용, AI QA 직접 터치). 좌표는 화면 대비 0~1. 누른 뒤 화면이 그대로면 알림. 예) qakit touch tap 0.5 0.9")
     p.add_argument("action", nargs="+", help="tap x y [ms] · press x y 초 · swipe x1 y1 x2 y2 초 · ping")
     p.set_defaults(func=cmd_touch)
 
@@ -195,6 +210,10 @@ def main():
     p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("doctor", help="환경 점검")
+    p.add_argument("--system", action="store_true", help="작업공간 없이 이 맥의 도구만 (Xcode·xcodegen·AI·안드로이드)")
+    p.add_argument("--json", action="store_true", help="--system 결과를 JSON으로 (맥 앱이 읽음)")
+    p.add_argument("--timeout", type=int, default=DOCTOR_TIMEOUT,
+                   help=f"바깥 도구(xcodebuild·simctl 등) 하나를 기다리는 최대 초 (기본 {DOCTOR_TIMEOUT}) — 넘기면 그 항목만 '확인 못 함'")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("build-app", help="대상 앱 빌드 + 설치 + 권한 허용")
@@ -298,6 +317,8 @@ def main():
     a.add_argument("--device-profile", default="pixel_7", help="기기 모양 (기본 pixel_7, avdmanager list device)")
     a.set_defaults(func=cmd_android_setup)
     a = asub.add_parser("doctor", help="안드로이드 도구·AVD·연결된 기기 점검")
+    a.add_argument("--timeout", type=int, default=DOCTOR_TIMEOUT,
+                   help=f"바깥 도구(adb·emulator 등) 하나를 기다리는 최대 초 (기본 {DOCTOR_TIMEOUT}) — 넘기면 그 항목만 '확인 못 함'")
     a.set_defaults(func=cmd_android_doctor)
     a = asub.add_parser("boot", help="에뮬레이터 띄우기 (부팅 완료까지 기다림)")
     a.add_argument("--avd", help=f"AVD 이름 (기본 {ANDROID_AVD})")
