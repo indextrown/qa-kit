@@ -108,5 +108,11 @@ class Codes(unittest.TestCase):
         self.assertIn("step_failed", q.failure_code("???"))
 
 
+class Suggest(unittest.TestCase):
+    def test_contains_condition_does_not_crash(self):
+        msg = '기대 조건 실패: {"contains":{"target":{"type":"textfield"},"text":"abc"}}'
+        self.assertEqual(q.suggestion_lines(msg, "Application @0,0 10x10\n  TextField #a @0,0 5x5"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
