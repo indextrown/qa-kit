@@ -151,7 +151,11 @@ def failed_targets(message):
             if "id" in v and isinstance(v["id"], str):
                 out.append(("id", v["id"]))
             elif "label" in v or "contains" in v:
-                out.append(("label", v.get("label") or v.get("contains"), v.get("type")))
+                lab = v.get("label") or v.get("contains")
+                if isinstance(lab, dict):   # contains: { target, text } 조건 → 그 대상
+                    walk(lab.get("target"))
+                elif isinstance(lab, (str, int, float)):
+                    out.append(("label", str(lab), v.get("type")))
             else:
                 for k in ("visible", "exists", "hittable", "for", "target", "on", "not"):
                     if k in v:
@@ -178,7 +182,7 @@ def suggest_targets(message, dump_text, limit=3):
     yq = lambda v: v if re.fullmatch(r"[A-Za-z0-9_.\-]+", v) else json.dumps(v, ensure_ascii=False)
     found, used = [], set()   # used: 이미 제안한 요소 (ID로 제안했으면 같은 요소를 라벨로 또 제안하지 않음)
     for t in failed_targets(message):
-        want = (t[1] or "").lower()
+        want = (t[1] if isinstance(t[1], str) else "").lower()
         if not want:
             continue
         scored = []

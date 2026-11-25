@@ -10,7 +10,10 @@ MCP_INSTRUCTIONS = """qakit: 시뮬레이터·에뮬레이터의 앱을 ID·라�
 순서: get_testing_guide(처음 한 번) → launch → screen(화면 구조 읽기) → tap·type_text·swipe·wait_for·expect → screen으로 결과 확인 → 반복.
 - 화면은 screen(텍스트)으로 읽는다. screenshot은 색·배치·이미지처럼 눈으로만 아는 것에만 (토큰이 많이 듦).
 - 대상(target)은 screen에 나온 #ID를 우선 쓴다. ID가 없으면 { type, label } (줄바꿈 라벨은 contains). 같은 대상이 여럿이면 index로 고른다.
-- 탭한 뒤에는 screen으로 다시 읽는다 — 방금 읽지 않은 화면의 요소는 누르지 않는다 (탭 결과에 화면 요약이 붙으면 그것으로 충분).
+- 탭한 뒤에는 screen으로 다시 읽는다 — 방금 읽지 않은 화면의 요소는 누르지 않는다 (탭 결과에 화면이 붙으면 그것으로 충분).
+- 조작 결과의 화면은 직전에 본 화면과 달라진 줄만 올 수 있다 (+ 새로 · - 사라짐 · ~ 바뀜). 큰 화면은 screen의 query·under로 필요한 부분만.
+- 결과 끝의 '확인됨 / 확인 안 됨' 줄을 본다. 확인 안 됨이면 같은 조작을 그대로 반복하지 말고 화면을 보고 다른 방법을.
+- 실패에는 '오류 코드 · 다음:'이 붙는다. 같은 인자로 그대로 다시 하지 말고 다음:을 따른다.
 - 여러 단계를 이미 알면 step 도구의 steps로 한 번에 보낸다 (왕복이 줄어 빠름). 공통 단계(use:)가 있으면 그것부터.
 - 비밀번호 등은 {secret:키} (작업공간 secrets.txt의 키)로만 친다. 실제 값을 묻거나 출력하지 않는다.
 - 문제는 같은 단계로 한 번 더 재현한 뒤 report_issue로 남긴다. 확인된 경로는 save_scenario로 시나리오로 남긴다 (재생해서 통과해야 남음).
@@ -110,7 +113,10 @@ def mcp_tools(direct=False):
         tool("get_testing_guide", "QA할 때 확인할 항목·여기서 못 하는 것·거짓 버그 피하기·보고 형식. 테스트 전에 한 번 읽는다."),
         tool("launch", "앱을 종료하고 새로 켠다. 기록(recorded_steps)도 여기서부터 새로 시작한다."),
         tool("screen", "지금 화면 구조: 요소마다 종류 #ID \"라벨\" @x,y 너비x높이. 대상(target)은 여기 나온 ID·라벨을 쓴다.",
-             {"all": {"type": "boolean", "description": "true면 라벨·ID 없는 요소까지 (기본 false)"}}),
+             {"all": {"type": "boolean", "description": "true면 라벨·ID 없는 요소까지 (기본 false)"},
+              "query": {"type": "string", "description": "이 글자(ID·라벨·값·종류)가 든 줄만 — 큰 화면에서 찾을 때"},
+              "under": {**MCP_TARGET, "description": "이 요소 아래(하위 트리)만 — 시트·목록 하나만 볼 때"},
+              "max": {"type": "number", "description": "최대 줄 수 (기본 300)"}}),
         tool("screenshot", "지금 화면 사진 (JPEG). 색·배치·지도·이미지처럼 화면 구조로 알 수 없는 것만 볼 때. "
                            "기본 폭은 기기에 맞춤(태블릿 1024, 폰 600) — 아주 작은 글자·지도 위 표시를 볼 때만 width를 키운다.",
              {"width": {"type": "number", "description": "사진 폭 px (300~1600)"}}),
@@ -352,6 +358,94 @@ def find_element(target, parsed, strict=False):
     return els[shown[idx]], None
 
 
+# ── Orca(stablyai/orca, MIT) 방식: 조작 뒤 화면은 달라진 줄만 · 전후 구조 비교로 헛조작 감지 · 확인됨/확인 안 됨 · 오류 코드 ──
+
+def screen_rows(parsed):
+    """화면 구조 → [(key, line, 요소 위치)]. key는 좌표와 상관없는 이름 (가장 가까운 ID 조상 > 종류#ID, ID가 없으면 라벨까지
+    + 같은 이름 순번) → 조작 전후에 같은 요소를 맞춰 비교한다 (위치·값이 바뀌면 ~, 새로 나오면 +, 사라지면 -)."""
+    rows, count, stack = [], collections.Counter(), []   # stack: (depth, id) — 지금 요소의 조상들
+    for i, e in enumerate(parsed.get("elements") or []):
+        while stack and stack[-1][0] >= e["depth"]:
+            stack.pop()
+        anc = next((x[1] for x in reversed(stack) if x[1]), "")
+        stack.append((e["depth"], e["id"]))
+        if e["type"] in ("Application", "Window"):
+            continue
+        label = (e["labelRaw"] or "").replace("\n", "⏎")
+        line = ("  " * min(e["depth"], 6) + e["type"] + (f' #{e["id"]}' if e["id"] else "") + (f' "{label[:80]}"' if label else "")
+                + (f' value="{e["value"][:40]}"' if e["value"] else "") + f' @{e["x"]},{e["y"]} {e["w"]}x{e["h"]}')
+        name = f'{anc}>{e["type"]}#{e["id"]}' if e["id"] else f'{anc}>{e["type"]}"{label[:40]}"'
+        count[name] += 1
+        rows.append((f"{name}·{count[name]}", line, i))
+    return rows
+
+
+def screen_diff(before, after, ratio=0.5):
+    """조작 전후 화면 줄 → (차이 줄 목록, 그대로인 줄 수). 바뀐 것이 전체의 ratio를 넘으면 (None, …) — 통째로 보내는 게 낫다."""
+    b = {k: line for k, line, _ in before}
+    a = {k for k, _, _ in after}
+    diff = [("+ " if k not in b else "~ ") + line.strip() for k, line, _ in after if b.get(k) != line]
+    diff += ["- " + line.strip() for k, line, _ in before if k not in a]
+    same = len(after) - sum(1 for d in diff if not d.startswith("- "))
+    if len(diff) > max(len(after), len(before), 1) * ratio:
+        return None, same
+    return diff, same
+
+
+def rows_same(a, b):
+    return a is not None and b is not None and [(k, l) for k, l, _ in a] == [(k, l) for k, l, _ in b]
+
+
+# 실패 글 → (오류 코드, 다음에 할 일). 같은 인자로 그대로 다시 하는 헛된 반복을 막는다 (Orca의 오류 코드 + 복구 안내 꼴).
+FAILURE_CODES = [
+    (r"같은 대상이 \d+개", "ambiguous_target", "후보 중 index(0부터)나 #ID로 하나를 골라 다시"),
+    (r"덮고 있음", "covered", "덮은 것(팝업·시트·키보드)을 먼저 닫거나, 정말 그 자리를 누르려면 via: xcuitest"),
+    (r"누르기 전에 이미 기대 효과", "already_true", "expect를 빼거나, 이 탭이 바꾸는 다른 조건으로"),
+    (r"기대 효과가 나타나지 않음", "no_effect", "screen·screenshot으로 지금 화면을 보고 다른 대상이나 via: xcuitest — 같은 탭을 그대로 반복하지 않는다"),
+    (r"화면 밖", "offscreen", "swipe나 step의 scroll-to로 화면 안으로 가져온 뒤"),
+    (r"앱이 종료|크래시|crash|ANR|화면에서 내려감|화면 맨 앞에 뜨지 않음", "app_not_running",
+     "logs(crash: true)로 원인을 보고 launch로 다시 켠다"),
+    (r"설치되어 있지 않|기기에 없거나|build-app", "app_not_installed", "사용자에게 알린다 — 앱 설치(qakit build-app)는 AI가 하지 않는다"),
+    (r"알 수 없는 단계|알 수 없는 조건|형식 오류|형식$|이 필요함", "bad_step", "단계 문법을 고친다 (read_scenario로 기존 시나리오 꼴을 본다)"),
+    (r"글자를 넣지 못함|글자가 들어가지 않음|넣은 값과 다름", "type_failed", "입력칸을 먼저 tap하고 다시, 또는 다른 칸이 포커스를 갖고 있지 않은지 screen으로"),
+    (r"화면 구조에 없음|나타나지 않음|찾지 못함|못 찾|없음", "not_found",
+     "screen으로 다시 읽어 ID·라벨을 확인 (로딩이면 wait_for, 목록 아래면 swipe). 실패 글의 '대신 이 대상?'을 먼저 본다"),
+    (r"기대 조건 실패|조건을 만족하지 못함", "condition_false", "screen으로 실제 상태를 보고 기대가 맞는지부터 — 앱 문제면 재현 뒤 report_issue"),
+    (r"초 안에 끝나지 않음|시간 초과|timeout", "timeout", "기기·앱이 멈췄는지 screenshot으로 보고, 필요하면 launch"),
+]
+
+
+def failure_code(text):
+    """실패 글 → '오류 코드: X · 다음: Y' 줄 (못 나누면 step_failed). 단계 글(timeout: 2 등)에 속지 않게 ❌ 줄만 본다."""
+    lines = [l for l in (text or "").splitlines() if l.lstrip().startswith(("❌", "→"))]
+    text = "\n".join(lines) or text or ""
+    for pat, code, nxt in FAILURE_CODES:
+        if re.search(pat, text):
+            return f"오류 코드: {code} · 다음: {nxt}"
+    return "오류 코드: step_failed · 다음: screen으로 지금 화면을 보고 원인을 찾는다 — 같은 조작을 그대로 반복하지 않는다"
+
+
+def filter_rows(rows, parsed, query=None, under=None):
+    """screen의 query·under: 필요한 줄만. → (줄 목록, 설명)"""
+    els = parsed.get("elements") or []
+    note = []
+    if under is not None:
+        el, why = find_element(under, parsed)
+        if not el:
+            return None, f"under 대상을 찾지 못함: {why}"
+        i = next(k for k, e in enumerate(els) if e is el)
+        end = i + 1
+        while end < len(els) and els[end]["depth"] > els[i]["depth"]:
+            end += 1
+        rows = [r for r in rows if i <= r[2] < end]
+        note.append(f"{_describe(els, i)} 아래")
+    if query:
+        q = str(query).lower()
+        rows = [r for r in rows if q in r[1].lower()]
+        note.append(f"'{query}' 든 줄")
+    return rows, " · ".join(note)
+
+
 class McpSession:
     """도구 호출을 qakit do / run 하위 프로세스로. 활동 기록·문제 보고는 results/ai/<시각>/"""
 
@@ -368,6 +462,7 @@ class McpSession:
         self.touch = None
         self.last_dump = None   # (시각, 화면 구조 글) — 그 뒤로 화면이 안 바뀌었으면 다시 읽지 않는다
         self.serve_hash_ok = None   # 떠 있는 실행기가 지금 코드인가 (세션에서 한 번 확인)
+        self.seen_rows = None   # AI가 마지막으로 본 화면 (조작 뒤 화면은 이것과 달라진 줄만 보낸다)
 
     @property
     def udid(self):
@@ -498,38 +593,95 @@ class McpSession:
             lines.append(f"   실패 시점 화면 구조: {out}")
         return False, "\n".join(lines)
 
-    def after_screen(self, settle=0.5, limit=120):
-        """조작 뒤 화면 요약 (AI가 screen을 다시 부르는 왕복을 아낌). QAKIT_AI_AUTOSCREEN=0이면 끔"""
-        if os.environ.get("QAKIT_AI_AUTOSCREEN", "1") == "0":
-            return ""
-        good, out = self.screen(settle=settle)
-        if not good:
-            return ""
-        lines = out.splitlines()
-        more = f"\n...({len(lines) - limit}줄 더 — 전체는 screen)" if len(lines) > limit else ""
-        return "\n\n지금 화면 (조작 뒤 자동으로 읽음):\n" + "\n".join(lines[:limit]) + more
-
-    def screen(self, all_=False, settle=0.3):
+    def read_rows(self, settle):
+        """화면 구조를 읽어 (parsed, rows) 또는 (None, 오류 글)"""
         good, out = self.dump_text(settle)
         if not good:
-            return False, out[-1500:]
+            return None, out[-1500:]
         self.last_dump = (time.time(), out)
         parsed = ui_parse_dump(out)
+        return parsed, screen_rows(parsed)
+
+    def recent_rows(self, age=15):
+        """조작 직전 화면 (방금 읽은 화면 구조가 있으면) — 조작 전후 비교용. 모르면 None"""
+        if not self.last_dump or time.time() - self.last_dump[0] > age:
+            return None
+        return screen_rows(ui_parse_dump(self.last_dump[1]))
+
+    def after_screen(self, settle=0.5, limit=120, pre=None, verified=None, field=None):
+        """조작 뒤 화면 (AI가 screen을 다시 부르는 왕복을 아낌) + 확인 줄. QAKIT_AI_AUTOSCREEN=0이면 끔.
+        - 직전에 AI가 본 화면과 달라진 줄만 (+ 새로 · - 사라짐 · ~ 바뀜). 바뀐 게 절반을 넘으면 통째로.
+        - pre(조작 직전 화면)와 같으면 0.3초 뒤 한 번 더 읽고, 그래도 같으면 '확인 안 됨' (헛조작 의심).
+        - verified: 실행기가 이미 확인한 것 (expect 통과 등). field: (입력칸 대상, 넣은 글자) — 칸 값을 다시 읽어 비교."""
+        if os.environ.get("QAKIT_AI_AUTOSCREEN", "1") == "0":
+            return ""
+        parsed, rows = self.read_rows(settle)
+        if parsed is None:
+            return ""
+        noop = False
+        if rows_same(pre, rows):
+            time.sleep(0.3)
+            again = self.read_rows(0.1)
+            if again[0] is not None:
+                parsed, rows = again
+            noop = rows_same(pre, rows)
+        diff, same = screen_diff(self.seen_rows, rows) if self.seen_rows is not None else (None, 0)
+        if diff is not None:
+            head = f"지금 화면 — 직전에 본 화면과 달라진 줄만 (+ 새로 · - 사라짐 · ~ 바뀜, 나머지 {same}줄 그대로 · 전체는 screen):"
+            body = diff or ["(달라진 줄 없음)"]
+        else:
+            head, body = "지금 화면 (조작 뒤 자동으로 읽음):", [l for _, l, _ in rows]
+        self.seen_rows = rows
+        more = f"\n...({len(body) - limit}줄 더 — 전체는 screen)" if len(body) > limit else ""
+        check = []
+        if field:
+            check.append(self.field_check(parsed, *field))
+        if verified:
+            check.append(f"확인됨: {verified}")
+        elif noop:
+            check.append("확인 안 됨: 조작 전후 화면 구조가 같음 — 눌러도 반응이 없었을 수 있음. "
+                         "화면이 원래 안 바뀌는 조작이면 괜찮고, 아니면 screenshot으로 보거나 다른 대상·via: xcuitest (같은 조작을 그대로 반복하지 않는다)")
+        elif pre is not None:
+            n = len(diff) if diff is not None else "여러"
+            check.append(f"확인됨: 화면 바뀜 ({n}줄)")
+        return "\n\n" + head + "\n" + "\n".join(body[:limit]) + more + ("\n\n" + "\n".join(c for c in check if c) if check else "")
+
+    def field_check(self, parsed, target, text):
+        """type_text 뒤 칸의 값을 다시 읽어 넣은 글자와 비교 (Orca의 입력 다시 읽기). 비밀값·비밀번호 칸은 비교하지 않음."""
+        if "{secret:" in text or not text:
+            return ""
+        el, _ = find_element(target, parsed)
+        if not el or el["type"] in ("SecureTextField",):
+            return ""
+        now = el.get("value") or el.get("labelRaw") or ""
+        if now == text:
+            return "확인됨: 입력칸 값이 넣은 글자와 같음"
+        if text in now:
+            return f"확인 안 됨: 입력칸 값 \"{now[:60]}\" — 넣은 글자 말고 다른 글자도 있음 (지워지지 않았거나 두 번 들어감)"
+        return f"확인 안 됨: 입력칸 값 \"{now[:60]}\" (넣은 글자 \"{text[:60]}\") — 서식이 붙는 칸이면 괜찮고, 아니면 다른 칸에 들어갔을 수 있음"
+
+    def screen(self, all_=False, settle=0.3, query=None, under=None, max_lines=300):
+        parsed, rows = self.read_rows(settle)
+        if parsed is None:
+            return False, rows
         scr = parsed["screen"] or {}
         lines = [f"화면 {scr.get('w')}x{scr.get('h')} pt · 요소 {len(parsed['elements'])}개 (#ID가 있으면 대상으로 그 ID를 쓴다)"]
-        body = [l for l in out.splitlines() if l and not l.startswith("#")] if all_ else None
-        if body is not None:
-            lines += body[:400]
+        max_lines = int(min(max(max_lines or 300, 20), 1000))
+        if all_:
+            lines += [l for l in self.last_dump[1].splitlines() if l and not l.startswith("#")][:400]
+            return True, "\n".join(lines)
+        if query or under is not None:
+            picked, note = filter_rows(rows, parsed, query, under)
+            if picked is None:
+                return False, note
+            lines[0] += f" · {note}: {len(picked)}줄"
+            body = [l for _, l, _ in picked]
         else:
-            for e in parsed["elements"]:
-                if e["type"] in ("Application", "Window"):
-                    continue
-                label = (e["labelRaw"] or "").replace("\n", "⏎")
-                lines.append("  " * min(e["depth"], 6) + f'{e["type"]}' + (f' #{e["id"]}' if e["id"] else "")
-                             + (f' "{label[:80]}"' if label else "") + (f' value="{e["value"][:40]}"' if e["value"] else "")
-                             + f' @{e["x"]},{e["y"]} {e["w"]}x{e["h"]}')
-            if len(lines) > 301:
-                lines = lines[:301] + [f"...({len(lines) - 301}줄 생략 — 필요하면 swipe 후 다시)"]
+            self.seen_rows = rows
+            body = [l for _, l, _ in rows]
+        lines += body[:max_lines]
+        if len(body) > max_lines:
+            lines.append(f"...({len(body) - max_lines}줄 생략 — query·under로 좁히거나 max를 늘린다)")
         return True, "\n".join(lines)
 
     def shot(self, width=None):
@@ -601,6 +753,7 @@ class McpSession:
             return [{"type": "text", "text": f"❌ 누르지 않음 — {_describe(els, i)} 의 가운데를 {_describe(els, j)} 가 덮고 있음. "
                                              "덮은 것을 먼저 닫거나, 정말 그 자리를 누르려면 via: xcuitest"}], True
         (x, y), rect = self.center(el, scr)
+        pre = screen_rows(parsed)
         cond = a.get("expect")
         if cond:   # 누르기 전에 이미 맞으면 탭의 효과를 알 수 없음 (XCUITest 탭과 같은 규칙)
             already, _ = self.check_now(tap_condition(cond))
@@ -621,13 +774,15 @@ class McpSession:
             if not good:
                 return [{"type": "text", "text": f"단계: {line_text}\n❌ 탭 뒤 기대 효과가 나타나지 않음 (직접 터치 {where}) — 탭이 무시됐거나 다른 곳에 닿았을 수 있음\n{out[-600:]}"}], True
         note = ""
-        if not cond and self.ring:
+        auto = os.environ.get("QAKIT_AI_AUTOSCREEN", "1") != "0"
+        if not cond and self.ring and not auto:   # 화면 구조로 확인하지 않을 때만 장면 크기로 추정
             changed = self.ring.wait_change(t0)
             if changed is False:
                 note = "\n⚠️ 1초 안에 화면 변화 없음 — 직접 터치가 무시됐을 수 있음 (화면이 원래 안 바뀌는 탭이면 괜찮음. 확실히 하려면 expect를 주거나 via: xcuitest)"
         do_log_write(self.ws, {"step": line_text})
         took = int((time.time() - t0) * 1000)
-        return [{"type": "text", "text": f"단계: {line_text}\n✅ 직접 터치 {where} {took}ms{note}{self.after_screen()}"}], False
+        after = self.after_screen(pre=pre, verified="expect 맞음" if cond else None)
+        return [{"type": "text", "text": f"단계: {line_text}\n✅ 직접 터치 {where} {took}ms{note}{after}"}], False
 
     def direct_gesture(self, name, a):
         """long_press·drag·tap_point 직접 터치. long_press·drag는 시나리오 단계(long-press·drag)로 기록, tap_point는 기록 안 함"""
@@ -663,6 +818,7 @@ class McpSession:
                 dx, dy = {"up": (0, -d), "down": (0, d), "left": (-d, 0), "right": (d, 0)}[a.get("dir") or "up"]
                 q = (min(max(p[0] + dx, 0.02), 0.98), min(max(p[1] + dy, 0.02), 0.98))
             cmd = f"swipe {p[0]:.4f} {p[1]:.4f} {q[0]:.4f} {q[1]:.4f} {float(a.get('seconds') or 0.5):.2f}"
+        pre = screen_rows(parsed)
         kind = {"tap_point": "tap", "long_press": "press", "drag": "drag"}[name]
         start = (rect["x"] + rect["w"] / 2) / scr["w"], (rect["y"] + rect["h"] / 2) / scr["h"]
         touch_mark(self.ws, kind, *start)   # 커서는 실제로 누르는 좌표 그대로
@@ -675,13 +831,20 @@ class McpSession:
         if not good:
             return [{"type": "text", "text": f"직접 터치 실패: {line}"}], True
         if name == "tap_point":
-            return [{"type": "text", "text": f"직접 터치: tap_point {mcp_yaml(a)} → {line} (좌표라 기록하지 않음 — 시나리오로 옮길 수 없음)"}], False
+            return [{"type": "text", "text": f"직접 터치: tap_point {mcp_yaml(a)} → {line} (좌표라 기록하지 않음 — 시나리오로 옮길 수 없음)"
+                                             + self.after_screen(pre=pre)}], False
         step = gesture_step(name, a)
         do_log_write(self.ws, {"step": step})
-        return [{"type": "text", "text": f"단계: {step}\n✅ 직접 터치 → {line}"}], False
+        return [{"type": "text", "text": f"단계: {step}\n✅ 직접 터치 → {line}{self.after_screen(pre=pre)}"}], False
 
     def call(self, name, a):
-        """→ (content 목록, 오류인가)"""
+        """→ (content 목록, 오류인가). 실패에는 오류 코드와 다음에 할 일을 붙인다."""
+        content, err = self._call(name, a)
+        if err and content and content[-1].get("type") == "text" and "오류 코드:" not in content[-1]["text"]:
+            content[-1] = {**content[-1], "text": content[-1]["text"] + "\n" + failure_code(content[-1]["text"])}
+        return content, err
+
+    def _call(self, name, a):
         if name == "tap_point" and not self.direct:   # 시뮬레이터를 찾기 전에 거절 (장면 보관 시작은 기기 찾기로 느릴 수 있음)
             return [{"type": "text", "text": "tap_point는 직접 터치 모드(AI QA)에서만"}], True
         if self.ring is None and name in MCP_ACTIONS and os.environ.get("QAKIT_AI_VIDEO", "1") != "0" \
@@ -696,7 +859,7 @@ class McpSession:
             ok_, out = self.do("launch")
             return text(out), not ok_
         if name == "screen":
-            ok_, out = self.screen(bool(a.get("all")))
+            ok_, out = self.screen(bool(a.get("all")), query=a.get("query"), under=a.get("under"), max_lines=a.get("max") or 300)
             return text(out), not ok_
         if name == "screenshot":
             data = self.shot(a.get("width"))
@@ -707,8 +870,9 @@ class McpSession:
             return self.direct_gesture(name, a)
         if name in ("long_press", "drag"):   # XCUITest로 (시나리오 단계 그대로)
             line = gesture_step(name, a)
+            pre = self.recent_rows()
             ok_, out = self.do(line)
-            return [{"type": "text", "text": f"단계: {line}\n{out}"}], not ok_
+            return [{"type": "text", "text": f"단계: {line}\n{out}" + (self.after_screen(pre=pre) if ok_ else "")}], not ok_
         if name == "tap" and self.direct and a.get("via") != "xcuitest":
             res = self.direct_tap(a)
             if res is not None:
@@ -721,6 +885,7 @@ class McpSession:
                     return text(f"❌ 누르지 않음 — {why}"), True
         if name == "step" and a.get("steps"):
             lines = [str(x).strip() for x in a["steps"] if str(x).strip()]
+            pre = self.recent_rows()
             outs = []
             for k, line in enumerate(lines):
                 ok_, out = self.do(line)
@@ -728,7 +893,7 @@ class McpSession:
                 if not ok_:
                     rest = f"\n(남은 {len(lines) - k - 1}단계는 하지 않음)" if k + 1 < len(lines) else ""
                     return text("\n".join(outs) + rest + self.after_screen()), True
-            return text("\n".join(outs) + self.after_screen()), False
+            return text("\n".join(outs) + self.after_screen(pre=pre)), False
         if name == "logs":
             if self.ws.platform != "android":
                 return text("logs는 지금 안드로이드만 (iOS는 qakit 실행 결과의 로그를 보세요)"), True
@@ -755,8 +920,15 @@ class McpSession:
                 line = f"expect: {mcp_yaml(a['condition'])}"
             else:
                 line = str(a["yaml"]).strip()
+            pre = self.recent_rows() if name in ("tap", "swipe", "step") else None
             ok_, out = self.do(line)
-            more = self.after_screen() if ok_ and name in ("tap", "swipe", "step") else ""
+            more = ""
+            if ok_ and name in ("tap", "swipe", "step"):
+                more = self.after_screen(pre=pre, verified="expect 맞음" if name == "tap" and a.get("expect") else None)
+            elif ok_ and name == "type_text":
+                more = self.after_screen(field=(a["into"], str(a["text"])))
+            elif ok_ and name in ("wait_for", "expect"):
+                more = "\n확인됨: 조건 맞음"
             return text(f"단계: {line}\n{out}{more}"), not ok_
         if name == "recorded_steps":
             steps, from_launch = do_log_read(self.ws)
@@ -965,7 +1137,8 @@ def ai_workspace_context(ws):
         keys = sorted(ws.secrets())
         if keys:
             lines.append("- 비밀값 키 (입력은 {secret:키}, 값은 묻지도 출력하지도 않음): " + ", ".join(keys))
-    lines.append("- 조작 도구(tap·step)의 결과에 조작 뒤 화면이 붙어 온다 — 그걸로 충분하면 screen을 다시 부르지 않는다.")
+    lines.append("- 조작 도구(tap·swipe·type_text·step)의 결과에 조작 뒤 화면(직전과 달라진 줄)과 확인 줄이 붙어 온다 — "
+                 "그걸로 충분하면 screen을 다시 부르지 않는다.")
     if android:
         lines.append("- 앱이 죽거나 멈추거나 네트워크 오류가 의심되면 logs 도구로 로그·크래시를 본다.")
     return "\n".join(lines)
