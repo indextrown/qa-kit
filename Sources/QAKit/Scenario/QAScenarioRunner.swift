@@ -289,7 +289,9 @@ public final class QAScenarioRunner {
 
         } else if let spec = step["type"] as? [String: Any] {
             let element = resolve(spec["into"] as Any)
-            element.clearAndType(text(spec["text"]))
+            let value = text(spec["text"])
+            element.clearAndType(value)
+            try verifyTyped(element, value)
 
         } else if let target = step["wait"] {
             let spec = target as? [String: Any]
@@ -891,6 +893,25 @@ public final class QAScenarioRunner {
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]),
               let s = String(data: data, encoding: .utf8) else { return "\(value)" }
         return s.count > 140 ? String(s.prefix(140)) + "…" : s
+    }
+
+    /// 넣은 뒤 칸의 값을 다시 읽는다 (Orca의 입력 다시 읽기). 옛 글자가 안 지워졌거나 두 번 들어갔거나 아예 안 들어갔으면
+    /// 한 번 더 지우고 넣고, 그래도 틀리면 실패. 비밀번호 칸(값이 •)·서식이 붙는 칸(전화번호 등)·자동 완성은 비교하지 않는다.
+    private func verifyTyped(_ element: XCUIElement, _ want: String) throws {
+        guard !want.isEmpty, element.exists, element.elementType != .secureTextField else { return }
+        let read = { (element.value as? String) ?? "" }
+        let empty = { (v: String) in v.isEmpty || v == element.placeholderValue }
+        let wrong = { (v: String) in empty(v) || (v != want && v.hasSuffix(want)) }   // 안 들어감 · 앞에 다른 글자가 남음/두 번
+        let got = read()
+        guard wrong(got) else { return }
+        if empty(got) { element.tap() } else {
+            element.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: got.count))
+        }
+        element.typeText(want)
+        let again = read()
+        guard wrong(again) else { return }
+        throw fail(empty(again) ? "입력칸에 글자가 들어가지 않음 — 다른 칸에 들어갔을 수 있음"
+                                : "입력칸 값이 넣은 값과 다름 (옛 글자가 남았거나 두 번 들어감): 칸 \(again.count)자, 넣은 \(want.count)자")
     }
 
     private func fail(_ message: String) -> QAError {
